@@ -90,12 +90,15 @@ def add_transaction(data: dict) -> str:
     fill = PatternFill("solid", start_color="E2EFDA" if is_income else "FCE4D6")
     font_color = "375623" if is_income else "843C0C"
 
+    currency = data.get("currency", "UZS")
+    amount_display = f'{data["amount"]:,.2f} $' if currency == "USD" else data["amount"]
     row_data = [
         data.get("date", date.today().strftime("%d.%m.%Y")),
         now.strftime("%H:%M"),
         data["type"],
         data["category"].split(" ", 1)[-1],
-        data["amount"],
+        amount_display,
+        currency,
         data["description"],
     ]
     next_row = ws.max_row + 1
@@ -223,17 +226,30 @@ async def category_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def amount_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().replace(",", "").replace(" ", "")
+    # Valyuta turini aniqlash
+    currency = "UZS"
+    if "$" in text or "usd" in text.lower() or "dollar" in text.lower():
+        currency = "USD"
+    # Belgilarni olib tashlash
+    text_clean = text.replace("$", "").replace("usd", "").replace("USD", "").replace("uzs", "").replace("UZS", "").strip()
     try:
-        amount = int(float(text))
+        amount = float(text_clean)
         if amount <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ Faqat musbat raqam kiriting:\n_Masalan: 50000_",
-                                         parse_mode="Markdown")
+        await update.message.reply_text(
+            "❌ Faqat raqam kiriting:\n_Masalan: 50000 yoki 540$ yoki 100 USD_",
+            parse_mode="Markdown"
+        )
         return ENTERING_AMOUNT
     context.user_data["amount"] = amount
+    context.user_data["currency"] = currency
+    if currency == "USD":
+        display = f"{amount:,.2f} $"
+    else:
+        display = f"{int(amount):,} UZS"
     await update.message.reply_text(
-        f"✅ Summa: *{amount:,} UZS*\n\n📝 Izoh kiriting:\n_Masalan: Tushlik, Maosh, Dorixona_",
+        f"✅ Summa: *{display}*\n\n📝 Izoh kiriting:\n_Masalan: Tushlik, Maosh, Dorixona_",
         parse_mode="Markdown"
     )
     return ENTERING_DESCRIPTION
@@ -317,14 +333,17 @@ async def confirm_transaction(update: Update, context: ContextTypes.DEFAULT_TYPE
             "type": d["transaction_type"],
             "category": d["category"],
             "amount": d["amount"],
+            "currency": d.get("currency", "UZS"),
             "description": d["description"],
             "date": d["date"],
         })
         emoji = "💚" if "Kirim" in d["transaction_type"] else "🔴"
         file_name = Path(file_path).name
+        currency = d.get("currency", "UZS")
+        amount_str = f"{d['amount']:,.2f} $" if currency == "USD" else f"{int(d['amount']):,} UZS"
         await query.edit_message_text(
             f"✅ *Saqlandi!*\n\n"
-            f"{emoji} *{d['amount']:,} UZS* — {d['description']}\n"
+            f"{emoji} *{amount_str}* — {d['description']}\n"
             f"📁 {d['category']}\n"
             f"📅 {d['date']}\n\n"
             f"💾 Fayl: `{file_name}`",
