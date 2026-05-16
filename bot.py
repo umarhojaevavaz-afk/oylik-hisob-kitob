@@ -304,10 +304,12 @@ async def custom_date_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _confirm_text(d):
+    currency = d.get("currency", "UZS")
+    amount_str = f"{d['amount']:,.2f} $" if currency == "USD" else f"{int(d['amount']):,} UZS"
     return (f"📋 *Tasdiqlang:*\n\n"
             f"{'Tur:':<14} {d['transaction_type']}\n"
             f"{'Kategoriya:':<14} {d['category']}\n"
-            f"{'Summa:':<14} *{d['amount']:,} UZS*\n"
+            f"{'Summa:':<14} *{amount_str}*\n"
             f"{'Izoh:':<14} {d['description']}\n"
             f"{'Sana:':<14} {d['date']}")
 
