@@ -459,6 +459,20 @@ async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Hisobot xatosi: {e}")
 
 
+async def reset_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Joriy oy Excel faylini tozalash"""
+    now = datetime.now()
+    path = EXCEL_DIR / f"{now.year}-{now.month:02d}-moliya.xlsx"
+    if path.exists():
+        path.unlink()
+        await update.message.reply_text(
+            "🗑 *Joriy oy ma'lumotlari tozalandi!*\n\nEndi yangi yozuvlar qo'shishingiz mumkin.",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text("📭 Bu oyda hali yozuv yo'q edi.")
+
+
 async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "users" not in context.bot_data:
         context.bot_data["users"] = set()
@@ -486,6 +500,7 @@ def main():
 
     app.add_handler(MessageHandler(filters.ALL, track_user), group=-1)
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("reset", reset_month))
     app.add_handler(conv)
     app.add_handler(MessageHandler(
         filters.Regex("^(📊 Bu oy statistikasi|📅 O'tgan oy hisoboti|📋 Bugungi yozuvlar|❓ Yordam)$"),
