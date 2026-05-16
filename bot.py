@@ -117,13 +117,32 @@ def add_transaction(data: dict) -> str:
     return str(path)
 
 
+def _parse_amount_currency(row):
+    """row[4]=summa, row[5]=currency yoki izoh (eski format)"""
+    raw = str(row[4] or "0")
+    # Belgilarni tozalash: "$", "," va bo'sh joylar
+    clean = raw.replace("$", "").replace(",", "").replace(" ", "").strip()
+    try:
+        amount = float(clean) if clean else 0.0
+    except ValueError:
+        amount = 0.0
+    # Currency aniqlash
+    currency = "UZS"
+    if "$" in raw:
+        currency = "USD"
+    elif row[5] is not None and str(row[5]).strip().upper() in ("USD", "UZS"):
+        currency = str(row[5]).strip().upper()
+    return amount, currency
+
+
 def get_monthly_summary(year: int, month: int) -> dict | None:
     path = get_excel_path(year, month)
     if not path.exists():
         return None
     wb = openpyxl.load_workbook(path)
     ws = wb["Tranzaksiyalar"]
-    total_in, total_out = 0, 0
+    total_in_uzs, total_out_uzs = 0.0, 0.0
+    total_in_usd, total_out_usd = 0.0, 0.0
     cats_out, cats_in = {}, {}
     count = 0
     for row in ws.iter_rows(min_row=2, values_only=True):
@@ -131,20 +150,27 @@ def get_monthly_summary(year: int, month: int) -> dict | None:
             continue
         tur = str(row[2] or "")
         kat = str(row[3] or "Boshqa")
-        try:
-            amount = float(str(row[4] or 0).replace(",", ""))
-        except ValueError:
+        amount, currency = _parse_amount_currency(row)
+        if amount == 0:
             continue
         count += 1
         if "Kirim" in tur:
-            total_in += amount
+            if currency == "USD":
+                total_in_usd += amount
+            else:
+                total_in_uzs += amount
             cats_in[kat] = cats_in.get(kat, 0) + amount
         else:
-            total_out += amount
+            if currency == "USD":
+                total_out_usd += amount
+            else:
+                total_out_uzs += amount
             cats_out[kat] = cats_out.get(kat, 0) + amount
-    return {"total_in": total_in, "total_out": total_out,
-            "net": total_in - total_out, "cats_in": cats_in,
-            "cats_out": cats_out, "count": count}
+    return {"total_in": total_in_uzs, "total_out": total_out_uzs,
+            "total_in_usd": total_in_usd, "total_out_usd": total_out_usd,
+            "net": total_in_uzs - total_out_uzs,
+            "net_usd": total_in_usd - total_out_usd,
+            "cats_in": cats_in, "cats_out": cats_out, "count": count}
 
 
 def get_today_records() -> list:
@@ -366,15 +392,23 @@ async def _current_stats(update):
         await msg.edit_text("📭 Bu oy hali yozuv yo'q.\n\nXarajat yoki daromad qo'shing!")
         return
     net_e = "✅" if s["net"] >= 0 else "⚠️"
-    text = (f"📊 *{now.year}-yil {MONTH_NAMES[now.month]} oyi*\n\n"
-            f"💚 Jami kirim:  *{s['total_in']:,.0f} UZS*\n"
-            f"🔴 Jami chiqim: *{s['total_out']:,.0f} UZS*\n"
-            f"{net_e} Sof balans:  *{s['net']:,.0f} UZS*\n"
-            f"📝 Yozuvlar: {s['count']} ta\n")
+    text = f"📊 *{now.year}-yil {MONTH_NAMES[now.month]} oyi*\n\n"
+    # UZS
+    if s["total_in"] or s["total_out"]:
+        text += (f"💚 Kirim (UZS):  *{s['total_in']:,.0f} UZS*\n"
+                 f"🔴 Chiqim (UZS): *{s['total_out']:,.0f} UZS*\n"
+                 f"{net_e} Balans (UZS): *{s['net']:,.0f} UZS*\n")
+    # USD
+    if s["total_in_usd"] or s["total_out_usd"]:
+        net_usd_e = "✅" if s["net_usd"] >= 0 else "⚠️"
+        text += (f"\n💚 Kirim (USD):  *{s['total_in_usd']:,.2f} $*\n"
+                 f"🔴 Chiqim (USD): *{s['total_out_usd']:,.2f} $*\n"
+                 f"{net_usd_e} Balans (USD): *{s['net_usd']:,.2f} $*\n")
+    text += f"\n📝 Jami yozuvlar: {s['count']} ta\n"
     if s["cats_out"]:
         text += "\n🔴 *Eng katta chiqimlar:*\n"
         for k, v in sorted(s["cats_out"].items(), key=lambda x: -x[1])[:5]:
-            text += f"  • {k}: {v:,.0f} UZS\n"
+            text += f"  • {k}: {v:,.2f}\n"
     await msg.edit_text(text, parse_mode="Markdown")
 
 
@@ -406,14 +440,31 @@ async def _today(update):
     if not records:
         await update.message.reply_text(f"📭 {today_str} — bugun hali yozuv yo'q.")
         return
-    tin = sum(float(str(r[4] or 0).replace(",","")) for r in records if "Kirim" in str(r[2] or ""))
-    tout = sum(float(str(r[4] or 0).replace(",","")) for r in records if "Chiqim" in str(r[2] or ""))
     text = f"📋 *{today_str} — Bugungi yozuvlar*\n\n"
+    tin_uzs = tout_uzs = tin_usd = tout_usd = 0.0
     for r in records:
         e = "💚" if "Kirim" in str(r[2] or "") else "🔴"
-        a = float(str(r[4] or 0).replace(",",""))
-        text += f"{e} {r[3]} — *{a:,.0f} UZS* — _{r[5]}_\n"
-    text += f"\n💚 Kirim: {tin:,.0f} | 🔴 Chiqim: {tout:,.0f} UZS"
+        amount, currency = _parse_amount_currency(r)
+        # izoh: eski formatda r[5], yangi formatda r[6]
+        desc = str(r[6] or r[5] or "")
+        if currency == "USD":
+            amt_str = f"{amount:,.2f} $"
+            if "Kirim" in str(r[2] or ""):
+                tin_usd += amount
+            else:
+                tout_usd += amount
+        else:
+            amt_str = f"{int(amount):,} UZS"
+            if "Kirim" in str(r[2] or ""):
+                tin_uzs += amount
+            else:
+                tout_uzs += amount
+        text += f"{e} {r[3]} — *{amt_str}* — _{desc}_\n"
+    text += "\n"
+    if tin_uzs or tout_uzs:
+        text += f"💚 Kirim: {tin_uzs:,.0f} | 🔴 Chiqim: {tout_uzs:,.0f} UZS\n"
+    if tin_usd or tout_usd:
+        text += f"💚 Kirim: {tin_usd:,.2f} | 🔴 Chiqim: {tout_usd:,.2f} $"
     await update.message.reply_text(text, parse_mode="Markdown")
 
 
