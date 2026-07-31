@@ -1,0 +1,6 @@
+moliya_data/
+*.xlsx
+.env
+venv/
+__pycache__/
+*.pyc

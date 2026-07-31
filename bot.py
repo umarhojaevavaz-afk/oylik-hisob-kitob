@@ -5,6 +5,7 @@ Faqat BOT_TOKEN kerak, hech qanday Google yo'q!
 """
 
 import os
+import json
 import logging
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -18,9 +19,10 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # ─── Sozlamalar ───────────────────────────────────────────────────────────────
-BOT_TOKEN = "5072885311:AAFL68nhof38RVMI9CnBYn5Yxqc8RJlC33s"
-EXCEL_DIR = Path("moliya_data")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
+EXCEL_DIR = Path(os.environ.get("EXCEL_DIR", "moliya_data"))
 EXCEL_DIR.mkdir(exist_ok=True)
+USERS_FILE = EXCEL_DIR / "users.json"
 
 MONTH_NAMES = ["", "Yanvar", "Fevral", "Mart", "Aprel", "May", "Iyun",
                "Iyul", "Avgust", "Sentabr", "Oktabr", "Noyabr", "Dekabr"]
@@ -55,28 +57,37 @@ def get_excel_path(year: int, month: int) -> Path:
     return EXCEL_DIR / f"{year}-{month:02d}-moliya.xlsx"
 
 
+HEADERS = ["Sana", "Vaqt", "Tur", "Kategoriya", "Summa", "Valyuta", "Izoh"]
+COL_WIDTHS = {"A": 12, "B": 8, "C": 12, "D": 22, "E": 18, "F": 10, "G": 30}
+
+
+def _write_headers(ws):
+    for col, h in enumerate(HEADERS, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = HDR_FONT
+        cell.fill = HDR_FILL
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = BORDER
+    for letter, width in COL_WIDTHS.items():
+        ws.column_dimensions[letter].width = width
+    ws.freeze_panes = "A2"
+
+
 def get_or_create_workbook(year: int, month: int):
     path = get_excel_path(year, month)
     if path.exists():
         wb = openpyxl.load_workbook(path)
+        ws = wb["Tranzaksiyalar"]
+        # Eski fayllarda sarlavha 6 ta ustun edi (Valyuta yo'q, Izoh noto'g'ri
+        # joyda). Ma'lumot qatorlariga tegmasdan sarlavhani yangilaymiz.
+        if str(ws.cell(row=1, column=6).value or "") != "Valyuta":
+            _write_headers(ws)
+            wb.save(path)
     else:
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Tranzaksiyalar"
-        headers = ["Sana", "Vaqt", "Tur", "Kategoriya", "Summa (UZS)", "Izoh"]
-        for col, h in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col, value=h)
-            cell.font = HDR_FONT
-            cell.fill = HDR_FILL
-            cell.alignment = Alignment(horizontal="center")
-            cell.border = BORDER
-        ws.column_dimensions["A"].width = 12
-        ws.column_dimensions["B"].width = 8
-        ws.column_dimensions["C"].width = 12
-        ws.column_dimensions["D"].width = 22
-        ws.column_dimensions["E"].width = 18
-        ws.column_dimensions["F"].width = 30
-        ws.freeze_panes = "A2"
+        _write_headers(ws)
         wb.save(path)
     return wb, path
 
@@ -91,13 +102,13 @@ def add_transaction(data: dict) -> str:
     font_color = "375623" if is_income else "843C0C"
 
     currency = data.get("currency", "UZS")
-    amount_display = f'{data["amount"]:,.2f} $' if currency == "USD" else data["amount"]
+    # Summa doim raqam bo'lib yoziladi — Excelda yig'indi/filtr ishlashi uchun.
     row_data = [
         data.get("date", date.today().strftime("%d.%m.%Y")),
         now.strftime("%H:%M"),
         data["type"],
         data["category"].split(" ", 1)[-1],
-        amount_display,
+        float(data["amount"]),
         currency,
         data["description"],
     ]
@@ -108,18 +119,23 @@ def add_transaction(data: dict) -> str:
         cell.font = Font(name="Arial", size=10, color=font_color if col in [3, 4, 5] else "000000")
         cell.fill = fill if col == 3 else PatternFill()
         if col == 5:
-            cell.number_format = "#,##0"
+            cell.number_format = "#,##0.00" if currency == "USD" else "#,##0"
             cell.alignment = Alignment(horizontal="right")
-        elif col in [1, 2, 3]:
+        elif col in [1, 2, 3, 6]:
             cell.alignment = Alignment(horizontal="center")
 
     wb.save(path)
     return str(path)
 
 
+def _cell(row, idx):
+    """Qator kalta bo'lsa ham xato bermaydi."""
+    return row[idx] if len(row) > idx else None
+
+
 def _parse_amount_currency(row):
-    """row[4]=summa, row[5]=currency yoki izoh (eski format)"""
-    raw = str(row[4] or "0")
+    """row[4]=summa, row[5]=valyuta (eski fayllarda summa ichida "$" bo'lishi mumkin)"""
+    raw = str(_cell(row, 4) if _cell(row, 4) is not None else "0")
     # Belgilarni tozalash: "$", "," va bo'sh joylar
     clean = raw.replace("$", "").replace(",", "").replace(" ", "").strip()
     try:
@@ -128,11 +144,27 @@ def _parse_amount_currency(row):
         amount = 0.0
     # Currency aniqlash
     currency = "UZS"
+    cur_cell = _cell(row, 5)
     if "$" in raw:
         currency = "USD"
-    elif row[5] is not None and str(row[5]).strip().upper() in ("USD", "UZS"):
-        currency = str(row[5]).strip().upper()
+    elif cur_cell is not None and str(cur_cell).strip().upper() in ("USD", "UZS"):
+        currency = str(cur_cell).strip().upper()
     return amount, currency
+
+
+def _fmt(amount: float, currency: str) -> str:
+    return f"{amount:,.2f} $" if currency == "USD" else f"{amount:,.0f} UZS"
+
+
+def _row_description(row) -> str:
+    """Izoh: yangi formatda 7-ustun, eski formatda 6-ustunda bo'lishi mumkin."""
+    desc = _cell(row, 6)
+    if desc:
+        return str(desc)
+    old = _cell(row, 5)
+    if old and str(old).strip().upper() not in ("USD", "UZS"):
+        return str(old)
+    return ""
 
 
 def get_monthly_summary(year: int, month: int) -> dict | None:
@@ -143,13 +175,16 @@ def get_monthly_summary(year: int, month: int) -> dict | None:
     ws = wb["Tranzaksiyalar"]
     total_in_uzs, total_out_uzs = 0.0, 0.0
     total_in_usd, total_out_usd = 0.0, 0.0
-    cats_out, cats_in = {}, {}
+    # Kategoriyalar valyuta bo'yicha alohida yig'iladi — UZS va USD ni
+    # qo'shib yuborish summani ma'nosiz qilib qo'yadi.
+    cats_out = {"UZS": {}, "USD": {}}
+    cats_in = {"UZS": {}, "USD": {}}
     count = 0
     for row in ws.iter_rows(min_row=2, values_only=True):
-        if not row[0]:
+        if not _cell(row, 0):
             continue
-        tur = str(row[2] or "")
-        kat = str(row[3] or "Boshqa")
+        tur = str(_cell(row, 2) or "")
+        kat = str(_cell(row, 3) or "Boshqa")
         amount, currency = _parse_amount_currency(row)
         if amount == 0:
             continue
@@ -159,18 +194,32 @@ def get_monthly_summary(year: int, month: int) -> dict | None:
                 total_in_usd += amount
             else:
                 total_in_uzs += amount
-            cats_in[kat] = cats_in.get(kat, 0) + amount
+            bucket = cats_in[currency]
         else:
             if currency == "USD":
                 total_out_usd += amount
             else:
                 total_out_uzs += amount
-            cats_out[kat] = cats_out.get(kat, 0) + amount
+            bucket = cats_out[currency]
+        bucket[kat] = bucket.get(kat, 0.0) + amount
     return {"total_in": total_in_uzs, "total_out": total_out_uzs,
             "total_in_usd": total_in_usd, "total_out_usd": total_out_usd,
             "net": total_in_uzs - total_out_uzs,
             "net_usd": total_in_usd - total_out_usd,
             "cats_in": cats_in, "cats_out": cats_out, "count": count}
+
+
+def _top_cats(cats: dict, limit: int, totals: dict | None = None) -> str:
+    """Valyuta bo'yicha eng katta kategoriyalar ro'yxati."""
+    text = ""
+    for currency in ("UZS", "USD"):
+        items = sorted(cats.get(currency, {}).items(), key=lambda x: -x[1])[:limit]
+        for kat, val in items:
+            line = f"  • {kat}: {_fmt(val, currency)}"
+            if totals and totals.get(currency):
+                line += f" ({val / totals[currency] * 100:.0f}%)"
+            text += line + "\n"
+    return text
 
 
 def get_today_records() -> list:
@@ -405,10 +454,9 @@ async def _current_stats(update):
                  f"🔴 Chiqim (USD): *{s['total_out_usd']:,.2f} $*\n"
                  f"{net_usd_e} Balans (USD): *{s['net_usd']:,.2f} $*\n")
     text += f"\n📝 Jami yozuvlar: {s['count']} ta\n"
-    if s["cats_out"]:
-        text += "\n🔴 *Eng katta chiqimlar:*\n"
-        for k, v in sorted(s["cats_out"].items(), key=lambda x: -x[1])[:5]:
-            text += f"  • {k}: {v:,.2f}\n"
+    top = _top_cats(s["cats_out"], 5)
+    if top:
+        text += "\n🔴 *Eng katta chiqimlar:*\n" + top
     await msg.edit_text(text, parse_mode="Markdown")
 
 
@@ -421,16 +469,21 @@ async def _last_month(update):
         await msg.edit_text(f"📭 {MONTH_NAMES[month]} oyi uchun ma'lumot yo'q.")
         return
     net_e = "✅" if s["net"] >= 0 else "⚠️"
-    text = (f"📅 *{year}-yil {MONTH_NAMES[month]} oyi*\n\n"
-            f"💚 Jami kirim:  *{s['total_in']:,.0f} UZS*\n"
-            f"🔴 Jami chiqim: *{s['total_out']:,.0f} UZS*\n"
-            f"{net_e} Sof balans:  *{s['net']:,.0f} UZS*\n"
-            f"📝 Jami: {s['count']} ta\n")
-    if s["cats_out"]:
-        text += "\n🔴 *Chiqimlar:*\n"
-        for k, v in sorted(s["cats_out"].items(), key=lambda x: -x[1])[:6]:
-            pct = v / (s["total_out"] or 1) * 100
-            text += f"  • {k}: {v:,.0f} ({pct:.0f}%)\n"
+    text = f"📅 *{year}-yil {MONTH_NAMES[month]} oyi*\n\n"
+    if s["total_in"] or s["total_out"]:
+        text += (f"💚 Jami kirim:  *{s['total_in']:,.0f} UZS*\n"
+                 f"🔴 Jami chiqim: *{s['total_out']:,.0f} UZS*\n"
+                 f"{net_e} Sof balans:  *{s['net']:,.0f} UZS*\n")
+    if s["total_in_usd"] or s["total_out_usd"]:
+        net_usd_e = "✅" if s["net_usd"] >= 0 else "⚠️"
+        text += (f"\n💚 Jami kirim:  *{s['total_in_usd']:,.2f} $*\n"
+                 f"🔴 Jami chiqim: *{s['total_out_usd']:,.2f} $*\n"
+                 f"{net_usd_e} Sof balans:  *{s['net_usd']:,.2f} $*\n")
+    text += f"\n📝 Jami: {s['count']} ta\n"
+    totals = {"UZS": s["total_out"], "USD": s["total_out_usd"]}
+    top = _top_cats(s["cats_out"], 6, totals)
+    if top:
+        text += "\n🔴 *Chiqimlar:*\n" + top
     await msg.edit_text(text, parse_mode="Markdown")
 
 
@@ -443,23 +496,21 @@ async def _today(update):
     text = f"📋 *{today_str} — Bugungi yozuvlar*\n\n"
     tin_uzs = tout_uzs = tin_usd = tout_usd = 0.0
     for r in records:
-        e = "💚" if "Kirim" in str(r[2] or "") else "🔴"
+        is_income = "Kirim" in str(_cell(r, 2) or "")
+        e = "💚" if is_income else "🔴"
         amount, currency = _parse_amount_currency(r)
-        # izoh: eski formatda r[5], yangi formatda r[6]
-        desc = str(r[6] or r[5] or "")
+        desc = _row_description(r)
         if currency == "USD":
-            amt_str = f"{amount:,.2f} $"
-            if "Kirim" in str(r[2] or ""):
+            if is_income:
                 tin_usd += amount
             else:
                 tout_usd += amount
         else:
-            amt_str = f"{int(amount):,} UZS"
-            if "Kirim" in str(r[2] or ""):
+            if is_income:
                 tin_uzs += amount
             else:
                 tout_uzs += amount
-        text += f"{e} {r[3]} — *{amt_str}* — _{desc}_\n"
+        text += f"{e} {_cell(r, 3)} — *{_fmt(amount, currency)}* — _{desc}_\n"
     text += "\n"
     if tin_uzs or tout_uzs:
         text += f"💚 Kirim: {tin_uzs:,.0f} | 🔴 Chiqim: {tout_uzs:,.0f} UZS\n"
@@ -497,7 +548,7 @@ async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
     if not s or s["count"] == 0:
         return
     net_e = "✅" if s["net"] >= 0 else "⚠️"
-    for uid in context.bot_data.get("users", set()):
+    for uid in load_users():
         try:
             await context.bot.send_message(
                 chat_id=uid,
@@ -513,26 +564,78 @@ async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def reset_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Joriy oy Excel faylini tozalash"""
+    """Joriy oy Excel faylini tozalash — avval tasdiq so'raladi"""
     now = datetime.now()
-    path = EXCEL_DIR / f"{now.year}-{now.month:02d}-moliya.xlsx"
-    if path.exists():
-        path.unlink()
-        await update.message.reply_text(
-            "🗑 *Joriy oy ma'lumotlari tozalandi!*\n\nEndi yangi yozuvlar qo'shishingiz mumkin.",
-            parse_mode="Markdown"
-        )
-    else:
+    path = get_excel_path(now.year, now.month)
+    if not path.exists():
         await update.message.reply_text("📭 Bu oyda hali yozuv yo'q edi.")
+        return
+    s = get_monthly_summary(now.year, now.month)
+    count = s["count"] if s else 0
+    keyboard = [[InlineKeyboardButton("🗑 Ha, o'chirilsin", callback_data="reset:yes"),
+                 InlineKeyboardButton("❌ Yo'q", callback_data="reset:no")]]
+    await update.message.reply_text(
+        f"⚠️ *Diqqat!*\n\n{now.year}-yil {MONTH_NAMES[now.month]} oyidagi "
+        f"*{count} ta yozuv* butunlay o'chiriladi.\nBuni orqaga qaytarib bo'lmaydi.\n\n"
+        f"Rostdan o'chirilsinmi?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def reset_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "reset:no":
+        await query.edit_message_text("✅ Bekor qilindi — hech narsa o'chirilmadi.")
+        return
+    now = datetime.now()
+    path = get_excel_path(now.year, now.month)
+    if not path.exists():
+        await query.edit_message_text("📭 Bu oyda hali yozuv yo'q edi.")
+        return
+    # O'chirishdan oldin zaxira nusxa qoldiramiz.
+    backup = path.with_suffix(f".backup-{now.strftime('%Y%m%d-%H%M%S')}.xlsx")
+    path.rename(backup)
+    await query.edit_message_text(
+        f"🗑 *Joriy oy ma'lumotlari tozalandi!*\n\n"
+        f"💾 Zaxira nusxa: `{backup.name}`\n"
+        f"Endi yangi yozuvlar qo'shishingiz mumkin.",
+        parse_mode="Markdown"
+    )
+
+
+def load_users() -> set:
+    try:
+        return set(json.loads(USERS_FILE.read_text()))
+    except (OSError, ValueError):
+        return set()
+
+
+def save_user(user_id: int) -> None:
+    users = load_users()
+    if user_id in users:
+        return
+    users.add(user_id)
+    try:
+        USERS_FILE.write_text(json.dumps(sorted(users)))
+    except OSError as e:
+        logger.error(f"users.json saqlanmadi: {e}")
 
 
 async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "users" not in context.bot_data:
-        context.bot_data["users"] = set()
-    context.bot_data["users"].add(update.effective_user.id)
+    """Foydalanuvchini diskka yozamiz — bot qayta ishga tushsa ham yo'qolmaydi."""
+    if update.effective_user:
+        save_user(update.effective_user.id)
 
 
 def main():
+    if not BOT_TOKEN:
+        raise SystemExit(
+            "❌ BOT_TOKEN topilmadi.\n"
+            "Tokenni muhit o'zgaruvchisi orqali bering:\n"
+            "  export BOT_TOKEN='...'   (yoki hosting panelidagi Environment Variables)"
+        )
     app = Application.builder().token(BOT_TOKEN).build()
 
     conv = ConversationHandler(
@@ -554,6 +657,7 @@ def main():
     app.add_handler(MessageHandler(filters.ALL, track_user), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset_month))
+    app.add_handler(CallbackQueryHandler(reset_confirmed, pattern="^reset:"))
     app.add_handler(conv)
     app.add_handler(MessageHandler(
         filters.Regex("^(📊 Bu oy statistikasi|📅 O'tgan oy hisoboti|📋 Bugungi yozuvlar|❓ Yordam)$"),
